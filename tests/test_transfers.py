@@ -625,6 +625,94 @@ async def test_parallel_cdn_download_reuploads_once_and_recovers():
     assert dc.reuploads == 1
 
 
+def test_download_tier_defaults_and_env_override(monkeypatch):
+    from pyrogram.client import _download_tier_params
+
+    assert _download_tier_params(True, False) == (6, 4, 32, 16)
+    assert _download_tier_params(False, True) == (6, 4, 150, 35)
+    assert _download_tier_params(False, False) == (5, 3, 8, 8)
+
+    monkeypatch.setenv("WZGRAM_DL_RATE_BOT", "99")
+    assert _download_tier_params(True, False)[2] == 99
+
+
+def test_upload_tier_defaults_and_env_override(monkeypatch):
+    from pyrogram.methods.advanced.save_file import _upload_tier_params
+
+    assert _upload_tier_params(True, False) == (64, 10)
+    assert _upload_tier_params(False, True) == (300, 14)
+    assert _upload_tier_params(False, False) == (32, 12)
+
+    monkeypatch.setenv("WZGRAM_UPLOAD_RATE_BOT", "7")
+    assert _upload_tier_params(True, False)[0] == 7
+
+
+async def _cdn_download_with_pool(dc, pool_size=6, fail_first=False):
+    client = make_e2e_client(dc, sessions=4)
+
+    async def stop():
+        pass
+
+    for session in await client._get_media_session_pool(2, 4):
+        session.stop = stop
+
+    cdn_sessions = dc.pool(pool_size, client)
+    for s in cdn_sessions:
+        s.stop = stop
+
+    served = {}
+
+    for s in cdn_sessions:
+        real_send = s.send
+
+        async def send(query, _s=s, _real=real_send, **kwargs):
+            inner = getattr(query, "query", query)
+            if isinstance(inner, raw.functions.upload.GetCdnFile):
+                served[_s] = served.get(_s, 0) + 1
+            return await _real(query, **kwargs)
+
+        s.send = send
+
+    it = iter(cdn_sessions)
+    real_get_session = client.get_session
+    state = {"failed": False}
+
+    async def get_session(*args, **kwargs):
+        if kwargs.get("is_cdn"):
+            if fail_first and not state["failed"]:
+                state["failed"] = True
+                raise OSError("cdn handshake refused")
+            return next(it)
+        return await real_get_session(*args, **kwargs)
+
+    client.get_session = get_session
+
+    total = 0
+    async for chunk in client.get_file(document(), SIZE):
+        total += len(chunk)
+
+    return total, served
+
+
+async def test_cdn_download_spreads_workers_over_a_session_pool():
+    dc = SlowCdnDC(SIZE, SIZE, rtt=0.02, seed_hashes=True)
+
+    total, served = await _cdn_download_with_pool(dc)
+
+    assert total == SIZE
+    assert len(served) > 1, f"GetCdnFile was served by {len(served)} CDN session(s); expected a pool"
+    assert sum(served.values()) == SIZE // CHUNK
+
+
+async def test_cdn_download_survives_a_failed_pool_session():
+    dc = SlowCdnDC(SIZE, SIZE, rtt=0.02, seed_hashes=True)
+
+    total, served = await _cdn_download_with_pool(dc, fail_first=True)
+
+    assert total == SIZE
+    assert sum(served.values()) == SIZE // CHUNK
+
+
 class CdnSessionFakeSession:
     MAX_RETRIES = 10
 
@@ -722,7 +810,7 @@ def test_cdn_redirect_carries_its_own_dc_id():
 def test_get_file_connects_to_the_redirected_dc():
     source = " ".join(inspect.getsource(pyrogram.Client.get_file).split())
 
-    assert "cdn_session = await self.get_session( r.dc_id," in source
+    assert "self.get_session(r.dc_id, is_media=True, is_cdn=True, temporary=True)" in source
 
 
 class MediaPoolFakeSession:

@@ -47,6 +47,28 @@ MAX_BATCH = 4 * 1024 * 1024
 PACER_BURST = 16
 
 
+def _upload_tier_params(is_bot: bool, is_premium: bool) -> tuple:
+    """Per-account upload tier: (SaveFilePart rate/s, session pool size).
+
+    Bots start at double the old rate: every flood now backs the pacer off
+    and staggers the retrying workers, so a fast start is self-regulating.
+    """
+    if is_bot:
+        return (
+            int(os.environ.get("WZGRAM_UPLOAD_RATE_BOT", 64)),
+            min(int(os.environ.get("WZGRAM_UPLOAD_POOL_BOT", 10)), POOL_SIZE),
+        )
+    if is_premium:
+        return (
+            int(os.environ.get("WZGRAM_UPLOAD_RATE_PREMIUM", 300)),
+            min(int(os.environ.get("WZGRAM_UPLOAD_POOL_PREMIUM", 14)), POOL_SIZE),
+        )
+    return (
+        int(os.environ.get("WZGRAM_UPLOAD_RATE_USER", 32)),
+        min(int(os.environ.get("WZGRAM_UPLOAD_POOL_USER", 12)), POOL_SIZE),
+    )
+
+
 async def _stop_workers(queue: asyncio.Queue, workers: list) -> list:
     """Retire the upload workers and collect what they ended with.
 
@@ -213,15 +235,8 @@ class SaveFile:
             file_total_parts = int(math.ceil(file_size / part_size))
             is_big = file_size > 10 * 1024 * 1024
             pool_cap = max(1, math.ceil((file_total_parts - file_part) / 2))
-            if is_bot:
-                rate_limit = int(os.environ.get("WZGRAM_UPLOAD_RATE_BOT", 32))
-                pool_size = min(int(os.environ.get("WZGRAM_UPLOAD_POOL_BOT", 8)), POOL_SIZE, pool_cap)
-            elif is_premium:
-                rate_limit = int(os.environ.get("WZGRAM_UPLOAD_RATE_PREMIUM", 300))
-                pool_size = min(int(os.environ.get("WZGRAM_UPLOAD_POOL_PREMIUM", 14)), POOL_SIZE, pool_cap)
-            else:
-                rate_limit = int(os.environ.get("WZGRAM_UPLOAD_RATE_USER", 32))
-                pool_size = min(int(os.environ.get("WZGRAM_UPLOAD_POOL_USER", 12)), POOL_SIZE, pool_cap)
+            rate_limit, tier_pool = _upload_tier_params(is_bot, is_premium)
+            pool_size = min(tier_pool, pool_cap)
 
             is_missing_part = file_id is not None
             file_id = file_id or self.rnd_id()

@@ -48,6 +48,7 @@ from pyrogram.errors import (
     BadRequest,
     CDNFileHashMismatch,
     ChannelPrivate,
+    Flood,
     FloodPremiumWait,
     FloodWait,
     PersistentTimestampInvalid,
@@ -183,6 +184,36 @@ def write_at(fd: int, data: bytes, offset: int) -> None:
 
     while view:
         view = view[os.write(fd, view):]
+
+
+def _download_tier_params(is_bot: bool, is_premium: bool) -> tuple:
+    """Per-account download tier: (pool sessions, workers per session, GetFile rate/s, burst).
+
+    Bots start at double the old defaults: the adaptive pacer backs the rate
+    off on every FLOOD_WAIT and the session flood gate staggers retries, so a
+    fast start is self-regulating - the server slows the transfer down
+    gracefully instead of being herd-retried into another flood.
+    """
+    if is_bot:
+        return (
+            int(os.environ.get("WZGRAM_DL_POOL_BOT", 6)),
+            int(os.environ.get("WZGRAM_DL_WORKERS_BOT", 4)),
+            int(os.environ.get("WZGRAM_DL_RATE_BOT", 32)),
+            int(os.environ.get("WZGRAM_DL_BURST_BOT", 16)),
+        )
+    if is_premium:
+        return (
+            int(os.environ.get("WZGRAM_DL_POOL_PREMIUM", 6)),
+            int(os.environ.get("WZGRAM_DL_WORKERS_PREMIUM", 4)),
+            int(os.environ.get("WZGRAM_DL_RATE_PREMIUM", 150)),
+            int(os.environ.get("WZGRAM_DL_BURST_PREMIUM", 35)),
+        )
+    return (
+        int(os.environ.get("WZGRAM_DL_POOL_USER", 5)),
+        int(os.environ.get("WZGRAM_DL_WORKERS_USER", 3)),
+        int(os.environ.get("WZGRAM_DL_RATE_USER", 8)),
+        int(os.environ.get("WZGRAM_DL_BURST_USER", 8)),
+    )
 
 
 class Client(Methods):
@@ -1227,7 +1258,11 @@ class Client(Methods):
                                     force=False
                                 )
                             )
-                        except (ChannelPrivate, PersistentTimestampOutdated, PersistentTimestampInvalid, TimeoutError):
+                        # a flooded difference fetch is best-effort like the rest:
+                        # letting it raise would drop every update after this one
+                        # in the batch, and the saved pts makes the next gap
+                        # recovery re-fetch whatever was missed anyway
+                        except (ChannelPrivate, PersistentTimestampOutdated, PersistentTimestampInvalid, Flood, TimeoutError):
                             pass
                         else:
                             if not isinstance(diff, raw.types.updates.ChannelDifferenceEmpty):
@@ -1254,27 +1289,32 @@ class Client(Methods):
                 )
             )
 
-            diff = await self.invoke(
-                raw.functions.updates.GetDifference(
-                    pts=updates.pts - updates.pts_count,
-                    date=updates.date,
-                    qts=-1
+            # the pts was already saved above, so a flooded or timed-out
+            # difference is simply retried by the next short update
+            try:
+                diff = await self.invoke(
+                    raw.functions.updates.GetDifference(
+                        pts=updates.pts - updates.pts_count,
+                        date=updates.date,
+                        qts=-1
+                    )
                 )
-            )
-
-            if diff.new_messages:
-                await self.dispatcher.enqueue_update(
-                    raw.types.UpdateNewMessage(
-                        message=diff.new_messages[0],
-                        pts=updates.pts,
-                        pts_count=updates.pts_count
-                    ),
-                    {u.id: u for u in diff.users},
-                    {c.id: c for c in diff.chats}
-                )
+            except (Flood, TimeoutError):
+                pass
             else:
-                if diff.other_updates:  # The other_updates list can be empty
-                    await self.dispatcher.enqueue_update(diff.other_updates[0], {}, {})
+                if diff.new_messages:
+                    await self.dispatcher.enqueue_update(
+                        raw.types.UpdateNewMessage(
+                            message=diff.new_messages[0],
+                            pts=updates.pts,
+                            pts_count=updates.pts_count
+                        ),
+                        {u.id: u for u in diff.users},
+                        {c.id: c for c in diff.chats}
+                    )
+                else:
+                    if diff.other_updates:  # The other_updates list can be empty
+                        await self.dispatcher.enqueue_update(diff.other_updates[0], {}, {})
         elif isinstance(updates, raw.types.UpdateShort):
             await self.dispatcher.enqueue_update(updates.update, {}, {})
 
@@ -1630,21 +1670,9 @@ class Client(Methods):
                 _is_bot = self.me.is_bot if hasattr(self.me, 'is_bot') else False
                 _is_premium = self.me.is_premium if hasattr(self.me, 'is_premium') else False
 
-                if _is_bot:
-                    dl_pool_size = int(os.environ.get("WZGRAM_DL_POOL_BOT", 5))
-                    dl_workers_per_session = int(os.environ.get("WZGRAM_DL_WORKERS_BOT", 3))
-                    dl_rate = int(os.environ.get("WZGRAM_DL_RATE_BOT", 16))
-                    dl_burst = int(os.environ.get("WZGRAM_DL_BURST_BOT", 8))
-                elif _is_premium:
-                    dl_pool_size = int(os.environ.get("WZGRAM_DL_POOL_PREMIUM", 6))
-                    dl_workers_per_session = int(os.environ.get("WZGRAM_DL_WORKERS_PREMIUM", 4))
-                    dl_rate = int(os.environ.get("WZGRAM_DL_RATE_PREMIUM", 150))
-                    dl_burst = int(os.environ.get("WZGRAM_DL_BURST_PREMIUM", 35))
-                else:
-                    dl_pool_size = int(os.environ.get("WZGRAM_DL_POOL_USER", 5))
-                    dl_workers_per_session = int(os.environ.get("WZGRAM_DL_WORKERS_USER", 3))
-                    dl_rate = int(os.environ.get("WZGRAM_DL_RATE_USER", 8))
-                    dl_burst = int(os.environ.get("WZGRAM_DL_BURST_USER", 8))
+                dl_pool_size, dl_workers_per_session, dl_rate, dl_burst = _download_tier_params(
+                    _is_bot, _is_premium
+                )
 
                 total_chunks = math.ceil((file_size - offset_bytes) / chunk_size)
                 pool_size = min(dl_pool_size, total_chunks)
@@ -1921,9 +1949,6 @@ class Client(Methods):
                 elif isinstance(r, raw.types.upload.FileCdnRedirect):
                     await _drop_prefetch()
 
-                    cdn_session = await self.get_session(
-                        r.dc_id, is_media=True, is_cdn=True, temporary=True
-                    )
                     _cdn_rate = TokenBucket(rate=dl_rate, burst=dl_burst)
                     _report_tasks = set()
                     _stop_requested = False
@@ -1975,6 +2000,26 @@ class Client(Methods):
                     )
                     cdn_tasks = []
 
+                    # One CDN connection caps in-flight GetCdnFile at MAX_INFLIGHT_MEDIA;
+                    # spread the workers over a small pool of temporary CDN sessions.
+                    # _cdn_rate still bounds the total request rate.
+                    cdn_pool_n = min(dl_pool_size, cdn_chunks) if cdn_chunks > 1 else 1
+                    cdn_pool_results = await asyncio.gather(*(
+                        self.get_session(r.dc_id, is_media=True, is_cdn=True, temporary=True)
+                        for _ in range(cdn_pool_n)
+                    ), return_exceptions=True)
+
+                    cdn_pool = []
+                    for _s in cdn_pool_results:
+                        if not isinstance(_s, BaseException) and all(_s is not _y for _y in cdn_pool):
+                            cdn_pool.append(_s)
+
+                    if not cdn_pool:
+                        _failed = [x for x in cdn_pool_results if isinstance(x, BaseException)]
+                        raise _failed[0] if _failed else OSError(f"No CDN session available for DC {r.dc_id}")
+
+                    cdn_session = cdn_pool[0]
+
                     try:
                         if cdn_chunks > 1:
                             cdn_work = asyncio.Queue()
@@ -1988,7 +2033,7 @@ class Client(Methods):
                             for i in range(cdn_chunks):
                                 cdn_work.put_nowait(offset_bytes + i * chunk_size)
 
-                            async def _cdn_worker():
+                            async def _cdn_worker(sess):
                                 nonlocal _cdn_done
 
                                 while True:
@@ -2008,7 +2053,7 @@ class Client(Methods):
                                             await _cdn_rate.acquire()
 
                                             try:
-                                                r2 = await cdn_session.invoke(
+                                                r2 = await sess.invoke(
                                                     raw.functions.upload.GetCdnFile(
                                                         file_token=r.file_token,
                                                         offset=at,
@@ -2093,8 +2138,8 @@ class Client(Methods):
                                         return
 
                             cdn_tasks = [
-                                asyncio.ensure_future(_cdn_worker())
-                                for _ in range(min(Session.MAX_INFLIGHT_MEDIA * 2, cdn_chunks))
+                                asyncio.ensure_future(_cdn_worker(cdn_pool[i % len(cdn_pool)]))
+                                for i in range(min(dl_pool_size * dl_workers_per_session, cdn_chunks))
                             ]
 
                             for t in cdn_tasks:
@@ -2255,7 +2300,7 @@ class Client(Methods):
                             for _t in list(_report_tasks):
                                 if not _t.done():
                                     _t.cancel()
-                        await cdn_session.stop()
+                        await asyncio.gather(*(s.stop() for s in cdn_pool), return_exceptions=True)
             except Exception:
                 raise
             finally:
