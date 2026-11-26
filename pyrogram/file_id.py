@@ -489,7 +489,13 @@ class FileUniqueId:
                 local_id=local_id
             )
 
-        if file_unique_type == FileUniqueType.DOCUMENT:
+        # SECURE, ENCRYPTED and TEMP carry the same int64 id as DOCUMENT
+        if file_unique_type in (
+            FileUniqueType.DOCUMENT,
+            FileUniqueType.SECURE,
+            FileUniqueType.ENCRYPTED,
+            FileUniqueType.TEMP,
+        ):
             media_id, = struct.unpack("<q", buffer.read())
 
             return FileUniqueId(
@@ -497,7 +503,6 @@ class FileUniqueId:
                 media_id=media_id
             )
 
-        # TODO: Add decoder for SECURE, ENCRYPTED and TEMP (FileUniqueType values 4, 5, 6)
         raise ValueError(f"Unknown decoder for file_unique_type {file_unique_type} of file_unique_id {file_unique_id}")
 
     def encode(self):
@@ -505,10 +510,14 @@ class FileUniqueId:
             string = struct.pack("<is", self.file_unique_type, String(self.url))
         elif self.file_unique_type == FileUniqueType.PHOTO:
             string = struct.pack("<iqi", self.file_unique_type, self.volume_id, self.local_id)
-        elif self.file_unique_type == FileUniqueType.DOCUMENT:
+        elif self.file_unique_type in (
+            FileUniqueType.DOCUMENT,
+            FileUniqueType.SECURE,
+            FileUniqueType.ENCRYPTED,
+            FileUniqueType.TEMP,
+        ):
             string = struct.pack("<iq", self.file_unique_type, self.media_id)
         else:
-            # TODO: Add encoder for SECURE, ENCRYPTED and TEMP (FileUniqueType values 4, 5, 6)
             raise ValueError(f"Unknown encoder for file_unique_type {self.file_unique_type}")
 
         return b64_encode(rle_encode(string))
