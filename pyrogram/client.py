@@ -360,7 +360,7 @@ class Client(Methods):
             Set a sleep threshold for flood wait exceptions happening globally in this client instance, below which any
             request that raises a flood wait will be automatically invoked again after sleeping for the required amount
             of time. Flood wait exceptions requiring higher waiting times will be raised.
-            Defaults to 10 seconds.
+            Defaults to 60 seconds (override with the ``WZGRAM_SLEEP_THRESHOLD`` environment variable).
 
         hide_password (``bool``, *optional*):
             Pass True to hide the password when typing it during the login.
@@ -475,7 +475,22 @@ class Client(Methods):
 
         return min(32, (os.cpu_count() or 0) + 4)
 
+    def _default_sleep_threshold() -> int:
+        # 60 matches what the send/edit methods already pass explicitly: reads,
+        # forwards and deletes should sit out a FLOOD_WAIT the same way instead
+        # of raising the moment it exceeds 10 s. -1 keeps "wait out anything".
+        override = os.environ.get("WZGRAM_SLEEP_THRESHOLD")
+
+        if override:
+            try:
+                return max(-1, int(override))
+            except ValueError:
+                pass
+
+        return 60
+
     WORKERS = _default_workers()
+    SLEEP_THRESHOLD = _default_sleep_threshold()
     WORKDIR = PARENT_DIR
 
     # Interval of seconds in which the updates watchdog will kick in
@@ -527,7 +542,7 @@ class Client(Methods):
         takeout: Optional[bool] = None,
         retries: int = Session.MAX_RETRIES,
         timeout: float = Session.WAIT_TIMEOUT,
-        sleep_threshold: int = Session.SLEEP_THRESHOLD,
+        sleep_threshold: int = SLEEP_THRESHOLD,
         hide_password: Optional[bool] = False,
         max_concurrent_transmissions: int = MAX_CONCURRENT_TRANSMISSIONS,
         max_message_cache_size: int = MAX_MESSAGE_CACHE_SIZE,
