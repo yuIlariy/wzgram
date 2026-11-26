@@ -173,6 +173,66 @@ async def _packed():
     return b"packed"
 
 
+class _AlwaysReplies:
+    def __init__(self, *args, **kwargs):
+        self.protocol = type("P", (), {"crypto_executor": None})()
+        self.queue = asyncio.Queue()
+        self.lock = asyncio.Lock()
+
+    async def connect(self):
+        pass
+
+    async def close(self):
+        pass
+
+    async def send(self, payload):
+        self.queue.put_nowait(b"reply")
+
+    async def recv(self):
+        return await self.queue.get()
+
+
+async def test_concurrent_flooded_starts_retry_staggered(monkeypatch, session_factory):
+    monkeypatch.setattr(DummyClient, "connection_factory", _AlwaysReplies)
+
+    slept = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay, *args):
+        slept.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    sessions = [session_factory() for _ in range(2)]
+
+    for s in sessions:
+        state = {"flooded": False}
+
+        async def fake_handle_packet(packet, s=s, state=state):
+            for result in list(s.results.values()):
+                if not state["flooded"]:
+                    state["flooded"] = True
+                    result.value = raw.types.RpcError(error_code=420, error_message="FLOOD_WAIT_1")
+                else:
+                    result.value = object()
+                result.event.set()
+
+        monkeypatch.setattr(s, "handle_packet", fake_handle_packet)
+        monkeypatch.setattr(s.loop, "run_in_executor", lambda ex, fn, *a: _packed())
+
+    await asyncio.gather(*(s.start(max_attempts=4) for s in sessions))
+
+    flood_sleeps = [d for d in slept if 1 <= d < 2]
+    assert len(flood_sleeps) == 2, f"expected one flood backoff per session, got {slept}"
+    assert flood_sleeps[0] != flood_sleeps[1], (
+        f"both flooded starts slept the identical backoff {flood_sleeps}; jitter should stagger them"
+    )
+
+    for s in sessions:
+        await s.stop()
+
+
 async def test_send_timeout_normalises_error_and_frees_result(monkeypatch, session_factory):
     s = session_factory()
 
