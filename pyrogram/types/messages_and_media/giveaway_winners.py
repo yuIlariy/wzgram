@@ -132,7 +132,7 @@ class GiveawayWinners(Object):
             pass
 
         return GiveawayWinners(
-            chat=types.Chat._parse_channel_chat(client, chats[giveaway_media.channel_id]),
+            chat=types.Chat._parse_channel_chat(client, chats.get(giveaway_media.channel_id)),
             giveaway_message_id=giveaway_media.launch_msg_id,
             giveaway_message=giveaway_message,
             winners_selection_date=utils.timestamp_to_datetime(giveaway_media.until_date),

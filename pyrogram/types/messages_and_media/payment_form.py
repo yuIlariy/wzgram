@@ -124,7 +124,7 @@ class PaymentForm(Object):
 
     @staticmethod
     def _parse(client, form: "raw.base.payments.PaymentForm") -> "PaymentForm":
-        users = {i.id: i for i in getattr(form, "users", [])}
+        users = {i.id: i for i in getattr(form, "users", None) or []}
 
         if isinstance(form, raw.types.payments.PaymentForm):
             return PaymentForm(
@@ -143,9 +143,9 @@ class PaymentForm(Object):
                 need_password=form.password_missing,
                 native_provider=form.native_provider,
                 # native_params,
-                additional_payment_options=types.List([types.PaymentOption._parse(option) for option in getattr(form, "additional_methods", [])]) or None,
+                additional_payment_options=types.List([types.PaymentOption._parse(option) for option in getattr(form, "additional_methods", None) or []]) or None,
                 # saved_info,
-                saved_credentials=types.List([types.SavedCredentials._parse(credential) for credential in getattr(form, "saved_credentials", [])]) or None,
+                saved_credentials=types.List([types.SavedCredentials._parse(credential) for credential in getattr(form, "saved_credentials", None) or []]) or None,
                 raw=form
             )
         elif isinstance(form, raw.types.payments.PaymentFormStarGift):

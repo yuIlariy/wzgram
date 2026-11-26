@@ -1671,7 +1671,7 @@ class Message(Object, Update):
         entities = types.List(
             filter(
                 lambda x: x is not None,
-                [types.MessageEntity._parse(client, entity, users) for entity in message.entities]
+                [types.MessageEntity._parse(client, entity, users) for entity in message.entities or []]
             )
         )
 
@@ -1774,7 +1774,7 @@ class Message(Object, Update):
             pinned=message.pinned,
             restriction_reason=types.List(
                 types.RestrictionReason._parse(reason)
-                for reason in getattr(message, "restriction_reason", [])
+                for reason in getattr(message, "restriction_reason", None) or []
             ) or None,
             fact_check=(
                 types.FactCheck._parse(client, message.factcheck, users)
@@ -1834,10 +1834,10 @@ class Message(Object, Update):
             if parsed_message.topic:
                 client.topic_cache[(parsed_message.chat.id, parsed_message.topic.id)] = parsed_message.topic
 
-        if not parsed_message.topic and parsed_message.chat.is_forum:
+        if not parsed_message.topic and parsed_message.chat and parsed_message.chat.is_forum:
             await Message._parse_forum_topic(client, parsed_message)
 
-        if chat.is_direct_messages and message.saved_peer_id:
+        if chat and chat.is_direct_messages and message.saved_peer_id:
             parsed_message.direct_messages_topic_id = message.saved_peer_id.user_id
 
             parsed_topic = client.topic_cache[(parsed_message.chat.id, parsed_message.direct_messages_topic_id)]
@@ -1856,7 +1856,7 @@ class Message(Object, Update):
                 except (ChannelPrivate, ChatAdminRequired):
                     pass
 
-        if not parsed_message.poll and not is_scheduled:  # Do not cache poll messages
+        if parsed_message.chat and not parsed_message.poll and not is_scheduled:  # Do not cache poll messages
             client.message_cache[(parsed_message.chat.id, parsed_message.id)] = parsed_message
 
         return parsed_message
