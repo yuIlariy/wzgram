@@ -89,7 +89,9 @@ async def test_a_flood_wait_sleeps_what_the_server_asked(tmp_path, monkeypatch):
     )
 
     assert result is not None
-    assert 42 in slept, f"slept {slept}; the server asked for 42 seconds"
+    assert any(42 <= s < 43 for s in slept), (
+        f"slept {slept}; the server asked for 42 seconds, plus at most 1s of jitter"
+    )
 
 
 async def test_a_503_storm_is_still_ridden_out(tmp_path, monkeypatch):
