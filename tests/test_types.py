@@ -2207,3 +2207,45 @@ def no_text_types(monkeypatch):
         return {"message": text or "", "entities": None}
 
     monkeypatch.setattr(pyrogram.utils, "parse_text_entities", parse_text_entities)
+
+
+async def test_web_page_parse_exposes_hash():
+    from pyrogram import raw
+
+    media = raw.types.MessageMediaWebPage(
+        webpage=raw.types.WebPage(
+            id=111, url="https://example.com", display_url="example.com", hash=222,
+            type="article", site_name="Ex", title="t", description="d",
+            photo=raw.types.PhotoEmpty(id=5),
+        )
+    )
+
+    parsed = types.WebPage._parse(None, media)
+
+    assert parsed.id == "111"
+    assert parsed.hash == "222"
+
+
+async def test_gift_attribute_backdrop_parses_pattern_color_and_backdrop_id():
+    from pyrogram import raw
+
+    attr = raw.types.StarGiftAttributeBackdrop(
+        name="bg", backdrop_id=7, center_color=1, edge_color=2,
+        pattern_color=3, text_color=4, rarity=0.5,
+    )
+
+    parsed = await types.GiftAttribute._parse(None, attr, {}, {})
+
+    assert parsed.backdrop_id == 7
+    assert parsed.pattern_color == 3
+    assert parsed.center_color == 1
+
+
+def test_gift_background_parses_all_colors():
+    from pyrogram import raw
+
+    bg = raw.types.StarGiftBackground(center_color=1, edge_color=2, text_color=4)
+    parsed = types.GiftBackground._parse(bg)
+
+    assert (parsed.center_color, parsed.edge_color, parsed.text_color) == (1, 2, 4)
+    assert types.GiftBackground._parse(None) is None

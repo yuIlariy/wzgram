@@ -280,7 +280,8 @@ class Gift(Object):
         owned_gift_id (``str``, *property*):
             Unique identifier of the gift.
     """
-    # TODO: Add background_emoji_id and pattern_color fields from raw.types.StarGiftAttributeModel
+    # backdrop colors/pattern_color are exposed on types.GiftAttribute, which
+    # already parses them off raw.types.StarGiftAttributeBackdrop
 
     def __init__(
         self,
@@ -491,10 +492,6 @@ class Gift(Object):
         doc = star_gift.sticker
         attributes = {type(i): i for i in doc.attributes}
 
-        # TODO?
-        # auction_slug
-        # background
-
         return Gift(
             id=star_gift.id,
             type=enums.GiftType.REGULAR,
@@ -518,6 +515,7 @@ class Gift(Object):
             locked_until_date=utils.timestamp_to_datetime(star_gift.locked_until_date),
             publisher_chat=types.Chat._parse_chat(client, chats.get(utils.get_raw_peer_id(star_gift.released_by))),
             auction_info=types.GiftAuction._parse(star_gift),
+            background=types.GiftBackground._parse(star_gift.background),
             unique_gift_variant_count=star_gift.upgrade_variants,
             minimum_resell_star_count=star_gift.resell_min_stars,
             raw=star_gift,

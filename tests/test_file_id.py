@@ -497,3 +497,32 @@ def test_stringify_file_unique_id():
     string = "{'file_unique_type': <FileUniqueType.DOCUMENT: 2>, 'media_id': 5312458109417947140}"
 
     assert str(FileUniqueId.decode(file_unique_id)) == string
+
+
+def test_secure_encrypted_and_temp_unique_ids_round_trip():
+    from pyrogram.file_id import b64_decode, rle_decode
+
+    for file_unique_type in (
+        FileUniqueType.SECURE,
+        FileUniqueType.ENCRYPTED,
+        FileUniqueType.TEMP,
+    ):
+        unique = FileUniqueId(file_unique_type=file_unique_type, media_id=5312458109417947140)
+        encoded = unique.encode()
+
+        decoded = FileUniqueId.decode(encoded)
+        assert decoded.file_unique_type == file_unique_type
+        assert decoded.media_id == 5312458109417947140
+        assert decoded.encode() == encoded
+
+        # same wire layout as DOCUMENT: <i type><q media_id>, rle+b64
+        wire = rle_decode(b64_decode(encoded))
+        assert struct.unpack("<iq", wire) == (file_unique_type, 5312458109417947140)
+
+    # a DOCUMENT unique id and a SECURE one with the same media id differ
+    # only in the type word
+    doc = rle_decode(b64_decode(FileUniqueId(file_unique_type=FileUniqueType.DOCUMENT, media_id=7).encode()))
+    sec = rle_decode(b64_decode(FileUniqueId(file_unique_type=FileUniqueType.SECURE, media_id=7).encode()))
+    assert doc[4:] == sec[4:]
+    assert struct.unpack("<i", doc[:4])[0] == FileUniqueType.DOCUMENT
+    assert struct.unpack("<i", sec[:4])[0] == FileUniqueType.SECURE

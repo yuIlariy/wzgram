@@ -25,12 +25,15 @@ from ..object import Object
 
 
 class WebPage(Object):
-    # TODO: Add hash and cached_page fields when Photo._parse supports them
+    # TODO: Add cached_page when a parsed Page type exists (Photo._parse has no hash)
     """A webpage preview
 
     Parameters:
         id (``str``):
             Unique identifier for this webpage.
+
+        hash (``str``, *optional*):
+            Hash of the webpage, used by the server to detect changes.
 
         url (``str``):
             Full URL for this webpage.
@@ -134,6 +137,7 @@ class WebPage(Object):
         *,
         client: Optional["pyrogram.Client"] = None,
         id: str,
+        hash: Optional[str] = None,
         url: str,
         display_url: Optional[str] = None,
         type: Optional[str] = None,
@@ -161,6 +165,7 @@ class WebPage(Object):
         super().__init__(client)
 
         self.id = id
+        self.hash = hash
         self.url = url
         self.display_url = display_url
         self.type = type
@@ -236,6 +241,7 @@ class WebPage(Object):
 
         return WebPage(
             id=str(webpage.id),
+            hash=str(webpage.hash),
             url=webpage.url,
             display_url=getattr(webpage, "display_url", None),
             type=getattr(webpage, "type", None),
