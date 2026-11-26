@@ -4336,6 +4336,73 @@ async def test_a_channel_difference_that_times_out_keeps_the_rest_of_the_batch()
     assert delivered == [1, 2]
 
 
+async def test_a_flooded_channel_difference_keeps_the_rest_of_the_batch():
+    from pyrogram import raw
+    from pyrogram.errors import FloodWait
+
+    client = _QtsClient()
+    delivered = []
+
+    async def enqueue_update(update, users, chats):
+        delivered.append(update.message.id)
+        return True
+
+    async def fetch_peers(peers):
+        return bool(peers)
+
+    async def resolve_peer(peer_id):
+        return raw.types.InputPeerChannel(channel_id=5, access_hash=1)
+
+    async def invoke(query):
+        raise FloodWait(value=60, rpc_name="updates.GetChannelDifference")
+
+    client.dispatcher.enqueue_update = enqueue_update
+    client.fetch_peers = fetch_peers
+    client.resolve_peer = resolve_peer
+    client.invoke = invoke
+    client._recover_too_long = lambda key, pts: None
+
+    await client.handle_updates(raw.types.Updates(
+        updates=[
+            raw.types.UpdateNewChannelMessage(
+                message=raw.types.Message(
+                    id=message_id, peer_id=raw.types.PeerChannel(channel_id=5), date=1, message=""
+                ),
+                pts=message_id + 1, pts_count=1,
+            )
+            for message_id in (1, 2)
+        ],
+        users=[raw.types.User(id=1, min=True)], chats=[], date=1700000000, seq=1,
+    ))
+
+    assert delivered == [1, 2]
+
+
+async def test_a_flooded_get_difference_is_skipped_not_raised():
+    from pyrogram import raw
+    from pyrogram.errors import FloodWait
+
+    client = _QtsClient()
+    delivered = []
+
+    async def enqueue_update(update, users, chats):
+        delivered.append(update)
+        return True
+
+    async def invoke(query, **kwargs):
+        raise FloodWait(value=60, rpc_name="updates.GetDifference")
+
+    client.dispatcher.enqueue_update = enqueue_update
+    client.invoke = invoke
+
+    await client.handle_updates(raw.types.UpdateShortMessage(
+        id=5, user_id=1, message="m", pts=7, pts_count=1, date=0
+    ))
+
+    assert client.states == [(0, 7, None, 0, None)]
+    assert delivered == []
+
+
 def _pts_batch(pts):
     from pyrogram import raw
 
