@@ -281,7 +281,9 @@ class Session:
                         "Session start attempt %d flood-limited, retrying in %ss",
                         attempt, backoff
                     )
-                    await asyncio.sleep(backoff)
+                    # sessions created as a pool all flood on the same attempt;
+                    # jitter keeps them from retrying in lockstep
+                    await asyncio.sleep(backoff + flood_wait_jitter(backoff))
                 except (InternalServerError, ServiceUnavailable, TimeoutError, OSError) as e:
                     await self._stop()
 
@@ -297,7 +299,7 @@ class Session:
                         "Session start attempt %d failed, retrying in %ss: %s",
                         attempt, backoff, str(e) or type(e).__name__
                     )
-                    await asyncio.sleep(backoff)
+                    await asyncio.sleep(backoff + flood_wait_jitter(backoff))
                 except RPCError as e:
                     self._start_exc = e
                     await self._stop()

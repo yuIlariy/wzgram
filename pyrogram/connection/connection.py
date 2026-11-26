@@ -142,7 +142,10 @@ class Connection:
                 last_error = e
                 log.warning("Unable to connect due to network issues: %s", e)
                 await self.protocol.close()
-                await asyncio.sleep(1)
+                # pooled sessions reconnecting after an outage must not retry in
+                # lockstep; session.py imports this module, so import lazily
+                from ..session.session import flood_wait_jitter
+                await asyncio.sleep(1 + flood_wait_jitter(1))
             else:
                 log.info("Connected! %s DC%s%s - IPv%s",
                          "Test" if self.test_mode else "Production",

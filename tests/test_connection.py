@@ -2812,3 +2812,41 @@ async def test_sign_in_bot_migration_keeps_dc_and_address_in_step():
     assert client.storage.values["dc_id"] == 5
     assert client.storage.values["server_address"] == "10.0.0.5"
     assert client.storage.values["auth_key"] == b"migrated-key"
+
+
+class _FlakyTCP:
+    attempts = 0
+
+    def __init__(self, *args, **kwargs):
+        _FlakyTCP.attempts += 1
+        self.lock = asyncio.Lock()
+
+    async def connect(self, address):
+        if _FlakyTCP.attempts < 3:
+            raise OSError("connection refused")
+
+    async def close(self):
+        pass
+
+
+async def test_connect_retries_are_jittered_not_lockstep(monkeypatch):
+    from pyrogram.connection import Connection
+
+    _FlakyTCP.attempts = 0
+
+    slept = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay, *args):
+        slept.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    conn = Connection(1, False, False, protocol_factory=_FlakyTCP)
+    await conn.connect()
+
+    assert _FlakyTCP.attempts == 3
+    assert len(slept) == 2, f"expected 2 retry sleeps, got {slept}"
+    assert all(1 <= s < 1.5 for s in slept), f"base 1s plus at most ~0.5s jitter expected, got {slept}"
+    assert slept[0] != slept[1], f"retries slept identical {slept}; jitter should stagger them"
