@@ -80,7 +80,7 @@ class Widget(Object):
     def _parse(media: "raw.types.MessageMediaWidget") -> Optional["Widget"]:
         try:
             html = zlib.decompress(media.payload, 47).decode()
-        except (zlib.error, UnicodeDecodeError):
+        except (zlib.error, UnicodeDecodeError, TypeError):
             return None
 
         return Widget(
