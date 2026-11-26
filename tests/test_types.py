@@ -2249,3 +2249,30 @@ def test_gift_background_parses_all_colors():
 
     assert (parsed.center_color, parsed.edge_color, parsed.text_color) == (1, 2, 4)
     assert types.GiftBackground._parse(None) is None
+
+
+def test_web_page_parse_tolerates_web_page_empty_and_pending():
+    # WebPageEmpty/WebPagePending carry only id+url(±date) and must not blow
+    # up on hash - regression: reading webpage.hash unguarded crashed every
+    # message with an empty/pending web page
+    from pyrogram import raw
+
+    for webpage in (
+        raw.types.WebPageEmpty(id=9, url="https://e.com"),
+        raw.types.WebPagePending(id=9, url="https://e.com", date=0),
+    ):
+        parsed = types.WebPage._parse(None, raw.types.MessageMediaWebPage(webpage=webpage))
+
+        assert parsed is not None
+        assert parsed.id == "9"
+        assert parsed.url == "https://e.com"
+        assert parsed.hash is None
+
+
+def test_web_page_parse_returns_none_for_not_modified():
+    from pyrogram import raw
+
+    media = raw.types.MessageMediaWebPage(
+        webpage=raw.types.WebPageNotModified(cached_page_views=3)
+    )
+    assert types.WebPage._parse(None, media) is None
