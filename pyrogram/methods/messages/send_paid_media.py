@@ -16,6 +16,7 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with Pyrogram.  If not, see <http://www.gnu.org/licenses/>.
 
+import asyncio
 import logging
 import os
 import re
@@ -250,7 +251,7 @@ class SendPaidMedia:
         multi_media = []
         peer = await self.resolve_peer(chat_id)
 
-        for i in media:
+        async def _build_input_media(i):
             if isinstance(i, types.InputMediaPhoto):
                 if isinstance(i.media, str):
                     if os.path.isfile(i.media):
@@ -458,7 +459,20 @@ class SendPaidMedia:
             else:
                 raise ValueError(f"{i.__class__.__name__} is not a supported type for send_paid_media")
 
-            multi_media.append(media)
+            return media
+
+        # Upload the paid media concurrently: each save_file is still bounded
+        # by save_file_semaphore and the shared pacer, so this only overlaps
+        # the per-file round trips instead of running them one after another.
+        tasks = [asyncio.ensure_future(_build_input_media(i)) for i in media]
+
+        try:
+            multi_media = await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         r = await self.invoke(
             raw.functions.messages.SendMedia(
