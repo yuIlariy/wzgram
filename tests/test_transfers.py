@@ -537,6 +537,94 @@ async def test_cdn_download_writes_every_chunk_to_disk(tmp_path):
         assert data[n * CHUNK: (n + 1) * CHUNK] == bytes([n]) * CHUNK
 
 
+class SlowCdnDC(CdnDC):
+    """CdnDC with a per-GetCdnFile round trip, so a sequential loop is slow."""
+
+    def __init__(self, size, hash_span, rtt=0.05, **kwargs):
+        super().__init__(size, hash_span, **kwargs)
+        self.rtt = rtt
+        self.cdn_inflight = 0
+        self.cdn_peak = 0
+
+    def _send_for(self, session):
+        base = super()._send_for(session)
+
+        async def send(query, **kwargs):
+            inner = getattr(query, "query", query)
+
+            if isinstance(inner, raw.functions.upload.GetCdnFile):
+                self.cdn_inflight += 1
+                self.cdn_peak = max(self.cdn_peak, self.cdn_inflight)
+                try:
+                    await asyncio.sleep(self.rtt)
+                    return self._answer(query)
+                finally:
+                    self.cdn_inflight -= 1
+
+            return await base(query, **kwargs)
+
+        return send
+
+
+async def test_cdn_download_fetches_chunks_in_parallel():
+    dc = SlowCdnDC(SIZE, SIZE, rtt=0.05, seed_hashes=True)
+
+    assert await download_cdn_download(dc) == SIZE
+    assert dc.cdn_peak > 1, (
+        f"peak concurrent GetCdnFile was {dc.cdn_peak}; expected parallel fetches"
+    )
+
+
+async def test_parallel_cdn_download_reassembles_chunks_in_order():
+    dc = SlowCdnDC(SIZE, SIZE, rtt=0.02, seed_hashes=True)
+    client = make_e2e_client(dc, sessions=4)
+
+    async def stop():
+        pass
+
+    for session in await client._get_media_session_pool(2, 4):
+        session.stop = stop
+
+    seen = []
+
+    async for chunk in client.get_file(document(), SIZE):
+        seen.append(chunk)
+
+    assert b"".join(seen) == window(0, SIZE)
+
+
+class ReuploadCdnDC(CdnDC):
+    def __init__(self, size, hash_span, reupload_at=3 * CHUNK, **kwargs):
+        super().__init__(size, hash_span, **kwargs)
+        self.reupload_at = reupload_at
+        self.reuploads = 0
+        self._reuploaded = False
+
+    def _answer(self, query):
+        inner = getattr(query, "query", query)
+
+        if (
+            isinstance(inner, raw.functions.upload.GetCdnFile)
+            and inner.offset == self.reupload_at
+            and not self._reuploaded
+        ):
+            return raw.types.upload.CdnFileReuploadNeeded(request_token=b"rt")
+
+        if isinstance(inner, raw.functions.upload.ReuploadCdnFile):
+            self.reuploads += 1
+            self._reuploaded = True
+            return True
+
+        return super()._answer(query)
+
+
+async def test_parallel_cdn_download_reuploads_once_and_recovers():
+    dc = ReuploadCdnDC(SIZE, SIZE, seed_hashes=True)
+
+    assert await download_cdn_download(dc) == SIZE
+    assert dc.reuploads == 1
+
+
 class CdnSessionFakeSession:
     MAX_RETRIES = 10
 

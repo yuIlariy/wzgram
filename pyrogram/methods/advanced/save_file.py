@@ -34,7 +34,7 @@ from pyrogram import raw
 from pyrogram import utils
 from pyrogram.errors import RPCError, Flood
 from pyrogram.methods.rate_limiter import AdaptiveBucket
-from pyrogram.session import Session
+from pyrogram.session import Session, flood_wait_jitter
 
 log = logging.getLogger(__name__)
 
@@ -164,6 +164,9 @@ class SaveFile:
                             if isinstance(e.value, int):
                                 delay = min(e.value, 300)
                             _pacer.on_flood()
+                            # workers that all flooded together must not re-fire
+                            # the same part on the same tick
+                            delay += flood_wait_jitter(delay)
                         log.warning(
                             "Retrying upload part (attempt %d/%d): %s",
                             attempt + 1, MAX_RETRIES, err_str[:120],

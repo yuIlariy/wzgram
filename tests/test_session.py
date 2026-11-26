@@ -11,7 +11,7 @@ import pyrogram.session.session as session_mod
 from pyrogram import raw
 from pyrogram.connection import Connection
 from pyrogram.connection.transport import TCPAbridged
-from pyrogram.errors import AuthKeyUnregistered, ServiceUnavailable
+from pyrogram.errors import AuthKeyUnregistered, FloodWait, ServiceUnavailable
 from pyrogram.session.internals import msg_id as msg_id_mod, MsgId
 from pyrogram.session.session import Session, _serialize_file_part
 
@@ -444,6 +444,61 @@ async def test_retries_still_retry():
 
     assert session.sent == 3
     assert result == "answer"
+
+
+class FloodSession:
+    MAX_RETRIES = Session.MAX_RETRIES
+    WAIT_TIMEOUT = Session.WAIT_TIMEOUT
+
+    def __init__(self, flood_times=0, amount=1.0):
+        self.sent = 0
+        self.flood_times = flood_times
+        self.amount = amount
+        self.send_times = []
+        self.is_started = asyncio.Event()
+        self.is_started.set()
+        self.last_packet_received = time.monotonic()
+        self.client = type("C", (), {"name": "fake"})()
+        self._flood_gate = asyncio.Lock()
+        self._flood_until = 0.0
+
+    async def send(self, query, timeout):
+        self.sent += 1
+        self.send_times.append(time.monotonic())
+        if self.sent <= self.flood_times:
+            raise FloodWait(value=self.amount, rpc_name="test.Fake")
+        return "answer"
+
+    async def restart(self):
+        pass
+
+
+async def test_concurrent_flood_waits_retry_staggered_not_in_lockstep():
+    session = FloodSession(flood_times=5, amount=1.0)
+
+    results = await asyncio.gather(*(
+        Session._invoke(session, FakeQuery(), 3, 1, 10) for _ in range(5)
+    ))
+
+    assert results == ["answer"] * 5
+    assert session.sent == 10
+    assert session._flood_until > 0, "the flood gate was never armed"
+
+    retries = session.send_times[5:]
+    spread = max(retries) - min(retries)
+    assert spread > 0.02, (
+        f"the 5 retries fired within {spread:.4f}s of each other; "
+        "the flood gate should spread them out"
+    )
+
+
+async def test_a_flood_wait_above_the_threshold_still_raises_at_once():
+    session = FloodSession(flood_times=1, amount=30)
+
+    with pytest.raises(FloodWait):
+        await Session._invoke(session, FakeQuery(), 3, 1, 10)
+
+    assert session.sent == 1
 METHODS = Path(__file__).resolve().parents[1] / "pyrogram" / "methods"
 
 

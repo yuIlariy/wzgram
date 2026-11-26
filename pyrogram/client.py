@@ -61,7 +61,7 @@ from pyrogram.handlers.handler import Handler
 from pyrogram.methods import Methods
 from pyrogram.methods.rate_limiter import AdaptiveBucket, TokenBucket
 from pyrogram.qrlogin import QRLogin
-from pyrogram.session import Auth, Session
+from pyrogram.session import Auth, Session, flood_wait_jitter
 from pyrogram.storage import SQLiteStorage, Storage
 from pyrogram.types import LinkPreviewOptions, ListenerRegistry, TermsOfService, User
 from pyrogram.utils import ainput
@@ -1711,7 +1711,7 @@ class Client(Methods):
                                         '[%s] Waiting for %s seconds before continuing (required by "upload.GetFile")',
                                         self.name, amount,
                                     )
-                                    await asyncio.sleep(amount)
+                                    await asyncio.sleep(amount + flood_wait_jitter(amount))
                         except BaseException:
                             buffer_slots.release()
                             raise
@@ -1928,6 +1928,7 @@ class Client(Methods):
                     _report_tasks = set()
                     _stop_requested = False
                     _cdn_hashes = {h.offset: h for h in r.file_hashes}
+                    _hashes_lock = asyncio.Lock()
 
                     async def _hashes_covering(start: int, length: int) -> list:
                         covering = []
@@ -1937,15 +1938,21 @@ class Client(Methods):
                             h = _cdn_hashes.pop(at, None)
 
                             if h is None:
-                                for fetched in await session.invoke(
-                                    raw.functions.upload.GetCdnFileHashes(
-                                        file_token=r.file_token,
-                                        offset=at
-                                    )
-                                ):
-                                    _cdn_hashes[fetched.offset] = fetched
+                                # parallel workers race for the same missing span;
+                                # one fetches it, the rest reuse what landed
+                                async with _hashes_lock:
+                                    h = _cdn_hashes.pop(at, None)
 
-                                h = _cdn_hashes.pop(at, None)
+                                    if h is None:
+                                        for fetched in await session.invoke(
+                                            raw.functions.upload.GetCdnFileHashes(
+                                                file_token=r.file_token,
+                                                offset=at
+                                            )
+                                        ):
+                                            _cdn_hashes[fetched.offset] = fetched
+
+                                        h = _cdn_hashes.pop(at, None)
 
                                 CDNFileHashMismatch.check(
                                     h is not None,
@@ -1957,7 +1964,196 @@ class Client(Methods):
 
                         return covering
 
+                    # One GetCdnFile per round trip caps a CDN download at one
+                    # chunk per RTT; when the size is known, fetch the remaining
+                    # chunks on parallel workers, the way the direct path above
+                    # does. The CDN session's own in-flight cap and _cdn_rate
+                    # still bound how many requests are actually on the wire.
+                    cdn_chunks = (
+                        min(total, math.ceil((file_size - offset_bytes) / chunk_size))
+                        if file_size > 0 else 0
+                    )
+                    cdn_tasks = []
+
                     try:
+                        if cdn_chunks > 1:
+                            cdn_work = asyncio.Queue()
+                            cdn_received = {}
+                            cdn_ready = asyncio.Event()
+                            _cdn_done = 0
+                            _reupload_lock = asyncio.Lock()
+                            _reupload_done = asyncio.Event()
+                            _reupload_done.set()
+
+                            for i in range(cdn_chunks):
+                                cdn_work.put_nowait(offset_bytes + i * chunk_size)
+
+                            async def _cdn_worker():
+                                nonlocal _cdn_done
+
+                                while True:
+                                    await buffer_slots.acquire()
+
+                                    try:
+                                        at = cdn_work.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        buffer_slots.release()
+                                        return
+
+                                    try:
+                                        slept = 0.0
+
+                                        while True:
+                                            await _reupload_done.wait()
+                                            await _cdn_rate.acquire()
+
+                                            try:
+                                                r2 = await cdn_session.invoke(
+                                                    raw.functions.upload.GetCdnFile(
+                                                        file_token=r.file_token,
+                                                        offset=at,
+                                                        limit=chunk_size
+                                                    ),
+                                                    timeout=Session.MEDIA_WAIT_TIMEOUT,
+                                                    sleep_threshold=0,
+                                                )
+                                            except (FloodWait, FloodPremiumWait) as e:
+                                                amount = e.value
+
+                                                if amount > 30 or slept + amount > 30 * Session.MAX_RETRIES:
+                                                    raise
+
+                                                slept += amount
+                                                log.warning(
+                                                    '[%s] Waiting for %s seconds before continuing (required by "upload.GetCdnFile")',
+                                                    self.name, amount,
+                                                )
+                                                await asyncio.sleep(amount + flood_wait_jitter(amount))
+                                                continue
+
+                                            if isinstance(r2, raw.types.upload.CdnFileReuploadNeeded):
+                                                # one worker reuploads while the rest wait on the event
+                                                async with _reupload_lock:
+                                                    _reupload_done.clear()
+                                                    try:
+                                                        try:
+                                                            await session.invoke(
+                                                                raw.functions.upload.ReuploadCdnFile(
+                                                                    file_token=r.file_token,
+                                                                    request_token=r2.request_token
+                                                                )
+                                                            )
+                                                        except VolumeLocNotFound:
+                                                            return
+                                                    finally:
+                                                        _reupload_done.set()
+                                                continue
+
+                                            break
+
+                                        chunk = r2.bytes
+                                        r2 = None
+
+                                        # https://core.telegram.org/cdn#decrypting-files
+                                        decrypted_chunk = await self.loop.run_in_executor(
+                                            self.crypto_executor,
+                                            aes.ctr256_decrypt,
+                                            chunk,
+                                            r.encryption_key,
+                                            bytearray(r.encryption_iv[:-4] + (at // 16).to_bytes(4, "big"))
+                                        )
+
+                                        hashes = await _hashes_covering(at, len(decrypted_chunk))
+
+                                        # https://core.telegram.org/cdn#verifying-files
+                                        def _check_all_hashes():
+                                            for h in hashes:
+                                                rel = h.offset - at
+                                                cdn_chunk = decrypted_chunk[rel: rel + h.limit]
+                                                CDNFileHashMismatch.check(
+                                                    h.hash == sha256(cdn_chunk).digest(),
+                                                    "h.hash == sha256(cdn_chunk).digest()"
+                                                )
+
+                                        await self.loop.run_in_executor(self.crypto_executor, _check_all_hashes)
+                                    except BaseException:
+                                        buffer_slots.release()
+                                        raise
+
+                                    if _write_mode:
+                                        write_at(_write_fd, decrypted_chunk, at)
+                                        buffer_slots.release()
+                                    else:
+                                        cdn_received[at] = decrypted_chunk
+
+                                    _cdn_done += 1
+                                    cdn_ready.set()
+
+                                    if len(chunk) < chunk_size:
+                                        return
+
+                            cdn_tasks = [
+                                asyncio.ensure_future(_cdn_worker())
+                                for _ in range(min(Session.MAX_INFLIGHT_MEDIA * 2, cdn_chunks))
+                            ]
+
+                            for t in cdn_tasks:
+                                t.add_done_callback(lambda _: cdn_ready.set())
+
+                            _reported_count = -1
+
+                            try:
+                                while current < total:
+                                    if _write_mode:
+                                        if _cdn_done >= cdn_chunks:
+                                            await _report(offset_bytes + _cdn_done * chunk_size)
+                                            return
+                                        for t in cdn_tasks:
+                                            if t.done() and not t.cancelled():
+                                                exc = t.exception()
+                                                if exc is not None:
+                                                    raise exc
+                                        if all(t.done() for t in cdn_tasks):
+                                            return
+                                        try:
+                                            await asyncio.wait_for(cdn_ready.wait(), 0.5)
+                                        except asyncio.TimeoutError:
+                                            pass
+                                        cdn_ready.clear()
+
+                                        if _cdn_done != _reported_count:
+                                            _reported_count = _cdn_done
+                                            await _report(offset_bytes + _cdn_done * chunk_size)
+
+                                        yield b""
+                                    else:
+                                        while offset_bytes not in cdn_received:
+                                            for t in cdn_tasks:
+                                                if t.done() and not t.cancelled():
+                                                    exc = t.exception()
+                                                    if exc is not None:
+                                                        raise exc
+                                            if all(t.done() for t in cdn_tasks):
+                                                return
+                                            await cdn_ready.wait()
+                                            cdn_ready.clear()
+
+                                        chunk = cdn_received.pop(offset_bytes)
+                                        buffer_slots.release()
+                                        yield chunk
+                                        current += 1
+                                        offset_bytes += chunk_size
+
+                                        await _report(offset_bytes)
+
+                                        if len(chunk) < chunk_size or current >= total:
+                                            return
+                            finally:
+                                for t in cdn_tasks:
+                                    if not t.done():
+                                        t.cancel()
+                            return
+
                         while True:
                             await _cdn_rate.acquire()
                             r2 = await cdn_session.invoke(
@@ -2052,9 +2248,13 @@ class Client(Methods):
                             if len(chunk) < chunk_size or current >= total:
                                 break
                     finally:
-                        for _t in list(_report_tasks):
-                            if not _t.done():
-                                _t.cancel()
+                        if cdn_tasks:
+                            await asyncio.gather(*cdn_tasks, return_exceptions=True)
+                            buffer_slots.release_all()
+                        else:
+                            for _t in list(_report_tasks):
+                                if not _t.done():
+                                    _t.cancel()
                         await cdn_session.stop()
             except Exception:
                 raise

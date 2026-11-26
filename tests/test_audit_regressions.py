@@ -2325,6 +2325,8 @@ def _flood_session(amounts):
     session._last_flood_decay = 0.0
     session.sent = []
     session.slept = []
+    session._flood_gate = asyncio.Lock()
+    session._flood_until = 0.0
 
     queue = list(amounts)
 
@@ -2380,7 +2382,9 @@ async def test_a_flood_under_the_threshold_is_still_slept(monkeypatch):
     session = _flood_session([3])
 
     assert await _drive(session, 10, monkeypatch) == "answered"
-    assert session.slept == [3]
+    assert len(session.slept) == 1 and 3 <= session.slept[0] < 4, (
+        f"slept {session.slept}; the server asked for 3 seconds, plus at most 1s of jitter"
+    )
 
 
 async def test_a_flood_that_never_lets_up_gives_up(monkeypatch):
@@ -2397,9 +2401,9 @@ async def test_a_flood_that_never_lets_up_gives_up(monkeypatch):
     with pytest.raises(FloodWait):
         await _drive(session, 10, monkeypatch)
 
-    assert sum(session.slept) <= 10 * 10, (
+    assert sum(session.slept) <= 10 * 10 + len(session.slept), (
         "the total time spent sleeping on floods is bounded by the threshold "
-        "the caller allowed"
+        "the caller allowed, plus at most 1s of jitter per wait"
     )
     assert len(session.slept) < 500, "it must stop asking long before the server does"
 

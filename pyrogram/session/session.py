@@ -20,6 +20,7 @@ import asyncio
 import bisect
 import logging
 import os
+import random
 import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -66,6 +67,13 @@ def _serialize_file_part(data: TLObject) -> Optional[bytes]:
         padding = -(length + 1) % 4
 
     return b"".join((header, prefix, data.bytes, bytes(padding)))
+
+
+def flood_wait_jitter(amount: float) -> float:
+    # Requests that all hit the same FLOOD_WAIT and all sleep exactly `amount`
+    # re-fire as one synchronized burst, which is what invites the next flood;
+    # a small random tail spreads the retries over a short window instead.
+    return random.uniform(0.0, min(1.0, amount * 0.2 + 0.1))
 
 
 class Result:
@@ -140,6 +148,8 @@ class Session:
         self._update_semaphore = asyncio.Semaphore(32)
         self._pending_updates = 0
         self._dropped_updates = 0
+        self._flood_until = 0.0
+        self._flood_gate = asyncio.Lock()
         self._invoke_semaphore = (
             asyncio.Semaphore(Session.MAX_INFLIGHT_MEDIA) if is_media else None
         )
@@ -350,6 +360,7 @@ class Session:
 
         self.stored_msg_ids.clear()
         self._msg_id_floor = 0
+        self._flood_until = 0.0
 
         if self.connection:
             await self.connection.close()
@@ -859,10 +870,18 @@ class Session:
 
                 slept += amount
 
+                # Every in-flight request that hit this FLOOD_WAIT would sleep
+                # exactly `amount` and re-fire on the same tick, so one gate
+                # arms the earliest retry time for the whole session and each
+                # waiter adds its own jitter on top.
+                async with self._flood_gate:
+                    self._flood_until = max(self._flood_until, time.monotonic() + amount)
+                    wait = self._flood_until - time.monotonic()
+
                 log.warning('[%s] Waiting for %s seconds before continuing (required by "%s")',
                             self.client.name, amount, query_name)
 
-                await asyncio.sleep(amount)
+                await asyncio.sleep(wait + flood_wait_jitter(amount))
             except (OSError, InternalServerError, ServiceUnavailable, TimeoutError) as e:
                 retries -= 1
                 if retries == 0:
