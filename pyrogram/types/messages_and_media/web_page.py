@@ -241,7 +241,8 @@ class WebPage(Object):
 
         return WebPage(
             id=str(webpage.id),
-            hash=str(webpage.hash),
+            # only a full WebPage carries hash; WebPageEmpty has just id+url
+            hash=str(webpage.hash) if isinstance(webpage, raw.types.WebPage) else None,
             url=webpage.url,
             display_url=getattr(webpage, "display_url", None),
             type=getattr(webpage, "type", None),
