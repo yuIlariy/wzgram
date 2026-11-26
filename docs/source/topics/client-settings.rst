@@ -113,7 +113,7 @@ Rate limiting and floods
     :header: Argument, Default, What it does
     :widths: 30 20 50
 
-    ``sleep_threshold``, ``10``, "seconds of ``FloodWait`` wzgram waits out for you"
+    ``sleep_threshold``, ``60``, "seconds of ``FloodWait`` wzgram waits out for you (``WZGRAM_SLEEP_THRESHOLD``)"
     ``rate_limits``, ``None``, "turn on the client-side token buckets (off while ``None``)"
 
 .. code-block:: python

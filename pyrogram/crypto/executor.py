@@ -11,7 +11,10 @@ def _default_crypto_workers() -> int:
         except ValueError:
             pass
 
-    return min(4, max(2, os.cpu_count() or 1))
+    # Every packet over INLINE_CRYPTO_MAX and every CDN chunk decrypt/hash runs
+    # on this shared pool; with parallel transfers (worker pool + CDN session
+    # pool) four threads can become the throughput bottleneck on bigger hosts.
+    return min(8, max(2, os.cpu_count() or 1))
 
 
 _crypto_pool = None

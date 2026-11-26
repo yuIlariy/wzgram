@@ -647,6 +647,23 @@ def test_upload_tier_defaults_and_env_override(monkeypatch):
     assert _upload_tier_params(True, False)[0] == 7
 
 
+def test_client_sleep_threshold_defaults_to_60_and_env_overrides(monkeypatch):
+    import pyrogram.client as client_mod
+
+    monkeypatch.delenv("WZGRAM_SLEEP_THRESHOLD", raising=False)
+    assert client_mod.Client.SLEEP_THRESHOLD == 60
+    assert client_mod.Client._default_sleep_threshold() == 60
+
+    client = pyrogram.Client("threshold-check", api_id=1, api_hash="x", in_memory=True)
+    assert client.sleep_threshold == 60
+
+    monkeypatch.setenv("WZGRAM_SLEEP_THRESHOLD", "15")
+    assert client_mod.Client._default_sleep_threshold() == 15
+
+    monkeypatch.setenv("WZGRAM_SLEEP_THRESHOLD", "-1")
+    assert client_mod.Client._default_sleep_threshold() == -1
+
+
 async def _cdn_download_with_pool(dc, pool_size=6, fail_first=False):
     client = make_e2e_client(dc, sessions=4)
 
