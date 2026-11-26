@@ -5467,6 +5467,130 @@ async def test_a_grouped_document_is_forced_to_stay_a_file():
     assert [m.force_file for m in uploads] == [True, False]
 
 
+async def test_send_media_group_uploads_album_items_concurrently_and_in_order():
+    client = _Client()
+    state = {"inflight": 0, "peak": 0}
+
+    async def save_file(path, *args, **kwargs):
+        if path is None:
+            return None
+
+        state["inflight"] += 1
+        state["peak"] = max(state["peak"], state["inflight"])
+
+        try:
+            await asyncio.sleep(0.02)
+            data = path.getvalue() if hasattr(path, "getvalue") else b""
+            return raw.types.InputFile(
+                id=int.from_bytes(data, "big") + 1, parts=1, name="x", md5_checksum=""
+            )
+        finally:
+            state["inflight"] -= 1
+
+    client.save_file = save_file
+
+    base_invoke = client.invoke
+
+    async def invoke(query, *args, **kwargs):
+        if isinstance(query, raw.functions.messages.UploadMedia):
+            file_id = query.media.file.id
+            return raw.types.MessageMediaDocument(
+                document=raw.types.Document(
+                    id=file_id, access_hash=2, file_reference=b"", date=0, mime_type="",
+                    size=1, dc_id=2, attributes=[], thumbs=[], video_thumbs=[]
+                )
+            )
+        return await base_invoke(query, *args, **kwargs)
+
+    client.invoke = invoke
+
+    items = [
+        types.InputMediaDocument(io.BytesIO(bytes([n])), file_name=f"f{n}.bin")
+        for n in range(4)
+    ]
+    await client.send_media_group("me", items)
+
+    multi = next(q for q in client.sent if isinstance(q, raw.functions.messages.SendMultiMedia))
+    assert [m.media.id.id for m in multi.multi_media] == [1, 2, 3, 4], (
+        "gather must keep the album order in SendMultiMedia"
+    )
+    assert state["peak"] > 1, (
+        f"peak concurrent save_file was {state['peak']}; album uploads should overlap"
+    )
+
+
+async def test_send_paid_media_uploads_items_concurrently_and_in_order():
+    from pyrogram.methods.messages.send_paid_media import SendPaidMedia
+
+    class _PaidClient(SendPaidMedia):
+        parse_mode = enums.ParseMode.MARKDOWN
+        link_preview_options = None
+        me = None
+
+        def __init__(self):
+            self.sent = []
+            self.parser = Parser(self)
+
+        async def resolve_peer(self, peer_id):
+            return raw.types.InputPeerSelf()
+
+        def rnd_id(self):
+            return 1
+
+        def guess_mime_type(self, filename):
+            return None
+
+    client = _PaidClient()
+    state = {"inflight": 0, "peak": 0}
+
+    async def save_file(path, *args, **kwargs):
+        if path is None:
+            return None
+
+        state["inflight"] += 1
+        state["peak"] = max(state["peak"], state["inflight"])
+
+        try:
+            await asyncio.sleep(0.02)
+            data = path.getvalue() if hasattr(path, "getvalue") else b""
+            return raw.types.InputFile(
+                id=int.from_bytes(data, "big") + 1, parts=1, name="x", md5_checksum=""
+            )
+        finally:
+            state["inflight"] -= 1
+
+    client.save_file = save_file
+
+    async def invoke(query, *args, **kwargs):
+        client.sent.append(query)
+
+        if isinstance(query, raw.functions.messages.UploadMedia):
+            file_id = query.media.file.id
+            return raw.types.MessageMediaPhoto(
+                photo=raw.types.Photo(
+                    id=file_id, access_hash=2, file_reference=b"", date=0,
+                    dc_id=2, sizes=[], video_sizes=[]
+                )
+            )
+
+        return _empty_updates()
+
+    client.invoke = invoke
+
+    await client.send_paid_media("me", 5, [
+        types.InputMediaPhoto(io.BytesIO(bytes([n])))
+        for n in range(4)
+    ])
+
+    send = next(q for q in client.sent if isinstance(q, raw.functions.messages.SendMedia))
+    assert [m.id.id for m in send.media.extended_media] == [1, 2, 3, 4], (
+        "gather must keep the paid-media order in SendMedia"
+    )
+    assert state["peak"] > 1, (
+        f"peak concurrent save_file was {state['peak']}; paid-media uploads should overlap"
+    )
+
+
 async def test_a_link_preview_url_is_sent_and_edited_as_a_web_page():
     client = _Client()
     options = types.LinkPreviewOptions(url="https://example.com", prefer_large_media=True)
